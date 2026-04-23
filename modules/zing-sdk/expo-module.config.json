@@ -1,0 +1,9 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": {
+    "modules": ["ZingSdkModule"]
+  },
+  "android": {
+    "modules": ["expo.modules.zingsdk.ZingSdkModule"]
+  }
+}
