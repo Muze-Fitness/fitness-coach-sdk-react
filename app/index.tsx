@@ -18,6 +18,9 @@ const MODULES: { route: ZingRoute; label: string }[] = [
   { route: 'ai_assistant', label: 'AI Coach' },
   { route: 'full_schedule', label: 'Full Schedule' },
   { route: 'profile_settings', label: 'Profile Settings' },
+  { route: 'body_scan', label: 'Body Scan' },
+  { route: 'flexibility_test', label: 'Flexibility Test' },
+  { route: 'fitness_test', label: 'Fitness Test' },
 ];
 
 export default function Home() {
@@ -27,7 +30,18 @@ export default function Home() {
 
   useEffect(() => {
     const subscription = addAuthStateListener(setAuthState);
-    initialize(ZING_API_KEYS)
+    initialize({
+      authentication: { apiKey: ZING_API_KEYS },
+      theme: {
+        colors: {
+          brandPrimary: '#F2001F',
+          brandSecondary: '#980052',
+        },
+        cornersRounding: {
+          buttonBorder: { type: 'value', value: 0 },
+        },
+      },
+    })
       .then(() => setReady(true))
       .catch((err: Error) => setError(err.message));
     return () => subscription.remove();

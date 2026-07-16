@@ -1,12 +1,14 @@
 import { NativeModule, requireNativeModule } from 'expo';
 
-import type { ZingApiKeys, ZingRoute, ZingSdkModuleEvents } from './ZingSdk.types';
+import type { NativeZingInitArgs, ZingRoute, ZingSdkModuleEvents } from './ZingSdk.types';
 
 declare class ZingSdkModule extends NativeModule<ZingSdkModuleEvents> {
-  initialize(keys: ZingApiKeys): Promise<void>;
+  initialize(args: NativeZingInitArgs): Promise<void>;
   login(): Promise<void>;
   logout(): Promise<void>;
   openScreen(route: ZingRoute): Promise<void>;
+  provideAuthToken(requestId: string, token: string): void;
+  rejectAuthToken(requestId: string, message: string): void;
 }
 
 export default requireNativeModule<ZingSdkModule>('ZingSdk');

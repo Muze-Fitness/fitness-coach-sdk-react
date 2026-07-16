@@ -1,6 +1,3 @@
-const fs = require('fs');
-const path = require('path');
-
 const {
   withInfoPlist,
   withEntitlementsPlist,
@@ -10,16 +7,6 @@ const {
   withAppBuildGradle,
   withProjectBuildGradle,
 } = require('@expo/config-plugins');
-
-function readAndroidApiKey(projectRoot) {
-  const file = path.join(projectRoot, 'constants', 'ZingApiKeys.ts');
-  const src = fs.readFileSync(file, 'utf8');
-  const match = src.match(/androidApiKey:\s*['"]([^'"]+)['"]/);
-  if (!match) {
-    throw new Error(`withZingSdk: androidApiKey not found in ${file}`);
-  }
-  return match[1];
-}
 
 const IOS_PERMISSIONS = {
   NSHealthShareUsageDescription:
@@ -35,7 +22,7 @@ const IOS_PERMISSIONS = {
 const SPM_PACKAGES = [
   {
     url: 'https://github.com/Muze-Fitness/zing-coach-sdk-ios',
-    version: '1.3.0',
+    version: '1.8.0',
     products: ['ZingCoach'],
   },
 ];
@@ -282,19 +269,16 @@ function findAppTargetUuid(objects, projectName) {
   return null;
 }
 
-const ZING_APPLICATION_CLASS = `coach.zing.fitness.coach.SdkApplication`;
-
-const ZING_SDK_INIT_MARKER = '// ZingSdk: pre-init before super.onCreate';
-
+// SDK initialization happens in the ZingSdk Expo module (driven from JS via
+// initialize()); MainApplication only needs the SdkApplication base class and Hilt.
 const withAndroidMainApplication = (config) =>
   withMainApplication(config, (cfg) => {
-    const androidApiKey = readAndroidApiKey(cfg.modRequest.projectRoot);
     let src = cfg.modResults.contents;
 
     if (!src.includes('import dagger.hilt.android.HiltAndroidApp')) {
       src = src.replace(
         /(package [^\n]+\n)/,
-        `$1\nimport coach.zing.fitness.coach.SdkApplication\nimport coach.zing.fitness.coach.SdkAuthentication\nimport coach.zing.fitness.coach.ZingSdk\nimport dagger.hilt.android.HiltAndroidApp\nimport kotlinx.coroutines.runBlocking\n`
+        `$1\nimport coach.zing.fitness.coach.SdkApplication\nimport dagger.hilt.android.HiltAndroidApp\n`
       );
     }
 
@@ -302,13 +286,6 @@ const withAndroidMainApplication = (config) =>
       /class MainApplication\s*:\s*Application\(\)/,
       `@HiltAndroidApp\nclass MainApplication : SdkApplication()`
     );
-
-    if (!src.includes(ZING_SDK_INIT_MARKER)) {
-      src = src.replace(
-        /(\s*)super\.onCreate\(\)\n/,
-        `$1super.onCreate()\n$1${ZING_SDK_INIT_MARKER}\n$1runBlocking { ZingSdk.init(SdkAuthentication.ApiKey(apiKey = "${androidApiKey}")) }\n`
-      );
-    }
 
     cfg.modResults.contents = src;
     return cfg;
@@ -322,13 +299,6 @@ const withAndroidAppBuildGradle = (config) =>
       src = src.replace(
         /apply plugin:\s*["']com\.android\.application["']/,
         `apply plugin: "com.android.application"\napply plugin: "com.google.devtools.ksp"\napply plugin: "dagger.hilt.android.plugin"`
-      );
-    }
-
-    if (!src.includes('ZingSdk: force androidx.navigation')) {
-      src = src.replace(
-        /dependencies\s*\{/,
-        `configurations.all {\n    // ZingSdk: force androidx.navigation to the version the SDK was built against (see fitness-coach-android/gradle/libs.versions.toml; navigation-compose is intentionally pinned at 2.5.3 due to b/297258205)\n    resolutionStrategy {\n        force "androidx.navigation:navigation-common:2.5.3"\n        force "androidx.navigation:navigation-common-ktx:2.5.3"\n        force "androidx.navigation:navigation-runtime:2.5.3"\n        force "androidx.navigation:navigation-runtime-ktx:2.5.3"\n        force "androidx.navigation:navigation-compose:2.5.3"\n    }\n}\n\ndependencies {`
       );
     }
 

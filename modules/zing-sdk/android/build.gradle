@@ -32,6 +32,6 @@ android {
 }
 
 dependencies {
-  api 'coach.zing:fitness-sdk:1.0.7'
+  api 'coach.zing:fitness-sdk:1.5.0'
   implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
 }
