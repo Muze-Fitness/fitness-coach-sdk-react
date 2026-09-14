@@ -1,39 +1,37 @@
-import type { EventSubscription } from 'expo-modules-core';
-import { Platform, processColor } from 'react-native';
+import { NativeModule, requireNativeModule, requireNativeView } from 'expo';
+import { useSyncExternalStore } from 'react';
+import { processColor, type ColorValue, type ViewProps } from 'react-native';
 
-import ZingSdkModule from './src/ZingSdkModule';
-import type {
-  NativeZingInitArgs,
-  ZingAuthState,
-  ZingAuthStateEvent,
-  ZingAuthTokenRequestEvent,
-  ZingExternalTokenAuth,
-  ZingInitializeOptions,
-  ZingPlatformValue,
-  ZingRoute,
-  ZingTheme,
-  ZingThemeColors,
-} from './src/ZingSdk.types';
+export type ZingAuthState =
+  | { state: 'loggedOut' }
+  | { state: 'inProgress' }
+  | { state: 'authenticated'; userId: string };
 
-export type {
-  ZingAuthState,
-  ZingAuthStateEvent,
-  ZingAuthentication,
-  ZingApiKeyAuth,
-  ZingExternalTokenAuth,
-  ZingConfiguration,
-  ZingCoachesAvailability,
-  ZingGenderAvailability,
-  ZingInitializeOptions,
-  ZingPlatformValue,
-  ZingRadius,
-  ZingRoute,
-  ZingTheme,
-  ZingThemeColors,
-  ZingThemeTypography,
-} from './src/ZingSdk.types';
+export type ZingCriticalError = { code: 'authError' | 'unknown'; message: string };
 
-const COLOR_TOKEN_KEYS: Record<keyof ZingThemeColors, string> = {
+export type ZingRoute =
+  | 'home'
+  | 'onboarding'
+  | 'customWorkout'
+  | 'aiAssistant'
+  | 'workoutPlanDetails'
+  | 'fullSchedule'
+  | 'profileSettings'
+  | 'bodyScan'
+  | 'flexibilityTest'
+  | 'fitnessTest';
+
+export type ZingAuthentication = { apiKey: string; partnerUserId?: string } | { externalToken: string };
+
+export type ZingConfiguration = {
+  coachesAvailability?: 'allCoaches' | 'userGenderBased';
+  genderAvailability?: 'all' | 'binary';
+  healthBackgroundSync?: boolean;
+};
+
+export type ZingRadius = { type: 'value'; value: number } | { type: 'pill' };
+
+const COLOR_TOKENS = {
   brandPrimary: 'brand/primary',
   brandSecondary: 'brand/secondary',
   textHeadingDarkPrimary: 'text/heading/dark-primary',
@@ -44,136 +42,131 @@ const COLOR_TOKEN_KEYS: Record<keyof ZingThemeColors, string> = {
   buttonSecondary: 'button/secondary',
   bgPrimary: 'bg/primary',
   bgSecondary: 'bg/secondary',
+} as const satisfies Record<string, string>;
+
+const RADIUS_TOKENS = {
+  button: 'radius/button',
+  input: 'radius/input',
+  hero: 'radius/hero',
+  modal: 'radius/modal',
+  cardSm: 'radius/card-sm',
+  cardMd: 'radius/card-md',
+  cardLg: 'radius/card-lg',
+} as const satisfies Record<string, string>;
+
+export type ZingTheme = {
+  colors?: Partial<Record<keyof typeof COLOR_TOKENS, ColorValue>>;
+  cornersRounding?: Partial<Record<keyof typeof RADIUS_TOKENS, ZingRadius>>;
+  typography?: { system?: string; brand?: string };
 };
 
-function buildNativeTheme(theme: ZingTheme): NativeZingInitArgs['theme'] {
-  const result: NonNullable<NativeZingInitArgs['theme']> = {};
+export type ZingHomeScreenConfiguration = { showCloseButton?: boolean; showAskCoachButton?: boolean };
 
-  if (theme.colors) {
-    const colors: Record<string, number> = {};
-    for (const [field, tokenKey] of Object.entries(COLOR_TOKEN_KEYS)) {
-      const value = theme.colors[field as keyof ZingThemeColors];
-      if (value == null) continue;
-      const processed = processColor(value);
-      if (typeof processed !== 'number') {
-        throw new Error(`Invalid color for theme.colors.${field}: ${String(value)}`);
-      }
-      // Normalize to unsigned ARGB32, matching Flutter's Color.toARGB32().
-      colors[tokenKey] = processed >>> 0;
-    }
-    if (Object.keys(colors).length > 0) result.colors = colors;
-  }
+export type ZingProfileParams = {
+  name?: string;
+  gender?: 'male' | 'female' | 'other' | 'preferNotToSay';
+  height?: number;
+  weight?: number;
+  age?: number;
+  measurementSystem?: 'metric' | 'imperial';
+};
 
-  if (theme.cornersRounding?.buttonBorder) {
-    result.cornersRounding = { 'button/border': theme.cornersRounding.buttonBorder };
-  }
+type NativeTheme = {
+  colors?: Record<string, number>;
+  cornersRounding?: Record<string, ZingRadius>;
+  typography?: { system?: string; brand?: string };
+};
 
-  const system = resolveFontName(theme.typography?.system);
-  const brand = resolveFontName(theme.typography?.brand);
-  if (system != null || brand != null) {
-    result.typography = {
-      ...(system != null && { system }),
-      ...(brand != null && { brand }),
-    };
-  }
+type NativeInitializeArgs = {
+  configuration?: Required<ZingConfiguration>;
+  theme?: NativeTheme;
+};
 
-  return Object.keys(result).length > 0 ? result : undefined;
+type NativeLoginArgs = { jwtToken?: string; apiKey?: string; partnerUserId?: string };
+
+declare class ZingSdkModule extends NativeModule<{
+  onAuthStateChanged: (state: ZingAuthState) => void;
+  onCriticalError: (error: ZingCriticalError) => void;
+}> {
+  initialize(args: NativeInitializeArgs): Promise<void>;
+  login(args: NativeLoginArgs): Promise<void>;
+  logout(): Promise<void>;
+  openScreen(route: ZingRoute, home: ZingHomeScreenConfiguration): Promise<void>;
+  setProfileParams(params: ZingProfileParams): Promise<void>;
 }
 
-function resolveFontName(value: ZingPlatformValue<string> | undefined): string | undefined {
-  if (value == null || typeof value === 'string') return value ?? undefined;
-  return Platform.OS === 'ios' ? value.ios : value.android;
+const ZingSdk = requireNativeModule<ZingSdkModule>('ZingSdk');
+
+function compact<T extends object>(values: T): Partial<T> {
+  return Object.fromEntries(Object.entries(values).filter(([, value]) => value != null)) as Partial<T>;
 }
 
-function buildNativeInitArgs(options: ZingInitializeOptions): NativeZingInitArgs {
-  const args: NativeZingInitArgs = { type: 'apiKey' };
-
-  if ('apiKey' in options.authentication) {
-    const { ios, android } = options.authentication.apiKey;
-    args.type = 'apiKey';
-    args.apiKey = Platform.OS === 'ios' ? ios : android;
-  } else {
-    args.type = 'externalToken';
-  }
-
-  if (options.configuration) {
-    args.configuration = {
-      coachesAvailability: options.configuration.coachesAvailability ?? 'allCoaches',
-      genderAvailability: options.configuration.genderAvailability ?? 'all',
-      healthBackgroundSync: options.configuration.healthBackgroundSync ?? false,
-    };
-  }
-
-  if (options.theme) {
-    args.theme = buildNativeTheme(options.theme);
-  }
-
-  return args;
+function toTokens<K extends string, V, R>(
+  values: Partial<Record<K, V>>,
+  tokens: Record<K, string>,
+  convert: (value: V) => R
+): Record<string, R> {
+  return Object.fromEntries(
+    Object.entries(compact(values)).map(([field, value]) => [tokens[field as K], convert(value as V)])
+  );
 }
 
-let tokenBridgeSubscriptions: EventSubscription[] = [];
-
-function attachTokenBridge(callbacks: ZingExternalTokenAuth): void {
-  tokenBridgeSubscriptions.forEach((subscription) => subscription.remove());
-  tokenBridgeSubscriptions = [
-    ZingSdkModule.addListener(
-      'onAuthTokenRequested',
-      async ({ requestId }: ZingAuthTokenRequestEvent) => {
-        try {
-          const token = await callbacks.getAuthToken();
-          ZingSdkModule.provideAuthToken(requestId, token);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          ZingSdkModule.rejectAuthToken(requestId, message);
-        }
-      }
-    ),
-    ZingSdkModule.addListener('onTokenInvalid', () => callbacks.onTokenInvalid()),
-  ];
+export function initialize({ configuration, theme }: { configuration?: ZingConfiguration; theme?: ZingTheme } = {}) {
+  return ZingSdk.initialize(
+    compact<NativeInitializeArgs>({
+      configuration: configuration && {
+        coachesAvailability: configuration.coachesAvailability ?? 'allCoaches',
+        genderAvailability: configuration.genderAvailability ?? 'all',
+        healthBackgroundSync: configuration.healthBackgroundSync ?? false,
+      },
+      theme:
+        theme &&
+        compact<NativeTheme>({
+          colors: theme.colors && toTokens(theme.colors, COLOR_TOKENS, (color) => (processColor(color) as number) >>> 0),
+          cornersRounding: theme.cornersRounding && toTokens(theme.cornersRounding, RADIUS_TOKENS, (radius) => radius),
+          typography: theme.typography && compact(theme.typography),
+        }),
+    })
+  );
 }
 
-let initializePromise: Promise<void> | null = null;
-
-async function runInitialize(options: ZingInitializeOptions): Promise<void> {
-  const args = buildNativeInitArgs(options);
-  if ('externalToken' in options.authentication) {
-    attachTokenBridge(options.authentication.externalToken);
-  }
-  await ZingSdkModule.initialize(args);
+export function login(authentication: ZingAuthentication) {
+  return ZingSdk.login(
+    'externalToken' in authentication
+      ? { jwtToken: authentication.externalToken }
+      : compact<NativeLoginArgs>(authentication)
+  );
 }
 
-/**
- * Repeated calls return the result of the first initialization; after a
- * failure, the next call retries.
- */
-export function initialize(options: ZingInitializeOptions): Promise<void> {
-  if (!initializePromise) {
-    initializePromise = runInitialize(options).catch((error: unknown) => {
-      initializePromise = null;
-      throw error;
-    });
-  }
-  return initializePromise;
+export function logout() {
+  return ZingSdk.logout();
 }
 
-export function login(): Promise<void> {
-  return ZingSdkModule.login();
+export function openScreen(route: ZingRoute, home: ZingHomeScreenConfiguration = {}) {
+  return ZingSdk.openScreen(route, home);
 }
 
-export function logout(): Promise<void> {
-  return ZingSdkModule.logout();
+export function setProfileParams(params: ZingProfileParams) {
+  return ZingSdk.setProfileParams(compact(params));
 }
 
-export function openScreen(route: ZingRoute): Promise<void> {
-  return ZingSdkModule.openScreen(route);
+let authState: ZingAuthState | null = null;
+ZingSdk.addListener('onAuthStateChanged', (state) => {
+  authState = state;
+});
+
+export function useAuthState() {
+  return useSyncExternalStore(
+    (onChange) => {
+      const subscription = ZingSdk.addListener('onAuthStateChanged', onChange);
+      return () => subscription.remove();
+    },
+    () => authState
+  );
 }
 
-export function addAuthStateListener(
-  listener: (state: ZingAuthState) => void
-): EventSubscription {
-  return ZingSdkModule.addListener('onAuthStateChanged', (event: ZingAuthStateEvent) => {
-    listener(event.state);
-  });
+export function addCriticalErrorListener(listener: (error: ZingCriticalError) => void) {
+  return ZingSdk.addListener('onCriticalError', listener);
 }
 
-export default ZingSdkModule;
+export const ZingHomeView = requireNativeView<ViewProps & ZingHomeScreenConfiguration>('ZingSdk');

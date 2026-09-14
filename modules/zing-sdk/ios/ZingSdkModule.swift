@@ -1,247 +1,183 @@
-import Combine
-import DesignSystem
 import ExpoModulesCore
 import UIKit
 import ZingCoachSDK
 
-public class ZingSdkModule: Module {
-  private struct InitArgumentError: Error {
-    let message: String
-  }
-
+public final class ZingSdkModule: Module {
   private var sdk: ZingSDK?
-  private var isInitializing = false
-  private var authStateCancellable: AnyCancellable?
-  private let tokenRequests = AuthTokenRequestStore()
-  private var authAdapter: AuthAdapter?
-  private var tokenErrorForwarder: TokenErrorForwarder?
+  private var authStateTask: Task<Void, Never>?
 
   public func definition() -> ModuleDefinition {
     Name("ZingSdk")
 
-    Events("onAuthStateChanged", "onAuthTokenRequested", "onTokenInvalid")
+    Events("onAuthStateChanged", "onCriticalError")
 
-    AsyncFunction("initialize") { (args: [String: Any], promise: Promise) in
-      guard self.sdk == nil, !self.isInitializing else {
-        promise.reject("ALREADY_INITIALIZED", "Zing SDK is already initialized")
-        return
-      }
-
-      let parameters: ZingSDK.InitializationParameters
-      do {
-        parameters = try self.makeInitializationParameters(args: args)
-      } catch let error as InitArgumentError {
-        promise.reject("INVALID_ARGUMENT", error.message)
-        return
-      }
-
-      self.isInitializing = true
-      Task { @MainActor in
-        let result = await ZingSDK.initialize(with: parameters)
-        self.isInitializing = false
-        switch result {
-        case .success(let instance):
-          self.sdk = instance
-          self.observeAuthState(instance)
-          promise.resolve(nil)
-        case .failure(let error):
-          promise.reject("INIT_FAILED", String(describing: error))
-        }
-      }
+    OnDestroy {
+      self.authStateTask?.cancel()
     }
 
-    AsyncFunction("login") { (promise: Promise) in
-      guard let sdk = self.sdk else {
-        promise.reject("NOT_INITIALIZED", "Zing SDK is not initialized")
-        return
+    AsyncFunction("initialize") { @MainActor (args: InitializeArgs) async throws in
+      guard self.sdk == nil else {
+        throw Exception(name: "AlreadyInitialized", description: "Zing SDK is already initialized")
       }
-      Task { @MainActor in
-        switch await sdk.login() {
-        case .success:
-          promise.resolve(nil)
-        case .failure(let error):
-          promise.reject("LOGIN_FAILED", String(describing: error))
-        }
-      }
-    }
 
-    AsyncFunction("logout") { (promise: Promise) in
-      guard let sdk = self.sdk else {
-        promise.reject("NOT_INITIALIZED", "Zing SDK is not initialized")
-        return
-      }
-      Task { @MainActor in
-        switch await sdk.logout() {
-        case .success:
-          promise.resolve(nil)
-        case .failure(let error):
-          promise.reject("LOGOUT_FAILED", String(describing: error))
-        }
-      }
-    }
+      let configuration = args.configuration.map {
+        ZingSDK.Configuration(
+          coachesAvailability: $0.coachesAvailability,
+          genderAvailability: $0.genderAvailability,
+          ahBackgroundDeliveryEnabled: $0.healthBackgroundSync
+        )
+      } ?? ZingSDK.Configuration()
+      let theme = args.theme.map { BridgeTheme(arguments: $0).build() }
 
-    AsyncFunction("openScreen") { (route: String, promise: Promise) in
-      guard let sdk = self.sdk else {
-        promise.reject("NOT_INITIALIZED", "Zing SDK is not initialized")
-        return
-      }
-      Task { @MainActor in
-        let screen: ZingSDK.Screen
-        switch route {
-        case "home":
-          screen = .program
-        case "custom_workout":
-          screen = .customWorkout
-        case "ai_assistant":
-          screen = .assistantChat
-        case "workout_plan_details", "full_schedule":
-          // The iOS SDK has no dedicated workout-plan-details screen.
-          screen = .fullSchedule
-        case "profile_settings":
-          screen = .profileSettings
-        case "body_scan":
-          screen = .bodyScan(useFrontCamera: true)
-        case "flexibility_test":
-          screen = .flexibilityTest(useFrontCamera: true)
-        case "fitness_test":
-          screen = .fitnessTest(useFrontCamera: true)
-        default:
-          promise.reject("UNKNOWN_ROUTE", "Route \(route) is not supported")
-          return
-        }
-
-        switch sdk.makeScreen(screen) {
-        case .success(let viewController):
-          self.present(viewController, promise: promise)
-        case .failure(let error):
-          switch error {
-          case .notLoggedIn:
-            promise.reject("NOT_LOGGED_IN", String(describing: error))
+      let sdk = try await ZingSDK.initialize(with: .init(theme: theme, configuration: configuration))
+      sdk.criticalErrorHandler = self
+      self.authStateTask = Task { [weak self] in
+        for await state in sdk.loginStatePublisher.values {
+          if let payload = state.payload {
+            self?.sendEvent("onAuthStateChanged", payload)
           }
         }
       }
+      self.sdk = sdk
     }
 
-    Function("provideAuthToken") { (requestId: String, token: String) in
-      self.tokenRequests.resolve(requestId: requestId, with: .success(token))
-    }
-
-    Function("rejectAuthToken") { (requestId: String, message: String) in
-      self.tokenRequests.resolve(
-        requestId: requestId,
-        with: .failure(AuthTokenBridgeError.rejected(message))
-      )
-    }
-
-    OnDestroy {
-      self.tokenRequests.failAll(with: AuthTokenBridgeError.bridgeDestroyed)
-    }
-  }
-
-  private func makeInitializationParameters(
-    args: [String: Any]
-  ) throws -> ZingSDK.InitializationParameters {
-    guard let type = args["type"] as? String else {
-      throw InitArgumentError(message: "authentication type is required")
-    }
-
-    let authentication: ZingSDK.AuthenticationType
-    switch type {
-    case "apiKey":
-      guard let key = args["apiKey"] as? String, !key.isEmpty else {
-        throw InitArgumentError(message: "apiKey is required")
+    AsyncFunction("login") { @MainActor (args: LoginArgs) async throws in
+      let authentication: ZingSDK.AuthenticationType
+      if let token = args.jwtToken {
+        authentication = .jwtToken(token: token)
+      } else if let key = args.apiKey {
+        authentication = .apiKey(key: key, partnerUserID: args.partnerUserId)
+      } else {
+        throw Exception(name: "InvalidAuthentication", description: "Provide either apiKey or externalToken")
       }
-      authentication = .apiKey(key: key)
-    case "externalToken":
-      let adapter = AuthAdapter(store: tokenRequests) { [weak self] requestId in
-        self?.sendEvent("onAuthTokenRequested", ["requestId": requestId])
-      }
-      let forwarder = TokenErrorForwarder { [weak self] in
-        self?.sendEvent("onTokenInvalid")
-      }
-      authAdapter = adapter
-      tokenErrorForwarder = forwarder
-      authentication = .externalToken(provider: adapter, errorHandler: forwarder)
-    default:
-      throw InitArgumentError(message: "Unknown auth type: \(type)")
+      try await self.requireSdk().login(with: authentication)
     }
 
-    let configuration: ZingSDK.Configuration
-    if let configDict = args["configuration"] as? [String: Any] {
-      guard
-        let coachesRaw = configDict["coachesAvailability"] as? String,
-        let coaches = CoachesAvailability(rawValue: coachesRaw),
-        let genderRaw = configDict["genderAvailability"] as? String,
-        let gender = GenderAvailability(rawValue: genderRaw),
-        let backgroundDeliveryEnabled = configDict["healthBackgroundSync"] as? Bool
-      else {
-        throw InitArgumentError(message: "Invalid configuration")
-      }
-      configuration = ZingSDK.Configuration(
-        coachesAvailability: coaches,
-        genderAvailability: gender,
-        ahBackgroundDeliveryEnabled: backgroundDeliveryEnabled
-      )
-    } else {
-      configuration = ZingSDK.Configuration()
+    AsyncFunction("logout") { @MainActor () async throws in
+      try await self.requireSdk().logout()
     }
 
-    let theme = (args["theme"] as? [String: Any]).map { BridgeTheme(arguments: $0).build() }
-    return ZingSDK.InitializationParameters(
-      authentication: authentication,
-      theme: theme,
-      configuration: configuration
-    )
-  }
-
-  @MainActor
-  private func present(_ viewController: UIViewController, promise: Promise) {
-    guard
-      let scene = UIApplication.shared.currentScene,
-      let rootViewController = scene.keyWindow?.rootViewController
-    else {
-      promise.reject("NO_ROOT_VIEW_CONTROLLER", "No root view controller available")
-      return
-    }
-
-    let presenter = rootViewController.topPresentedViewController.topInNavigationController
-    viewController.modalPresentationStyle = .fullScreen
-    presenter.present(viewController, animated: true)
-    promise.resolve(nil)
-  }
-
-  private func observeAuthState(_ sdk: ZingSDK) {
-    authStateCancellable = sdk.loginStatePublisher
-      .receive(on: DispatchQueue.main)
-      .sink { [weak self] state in
-        let payload: [String: String]
-        switch state {
-        case .loggedOut:
-          payload = ["state": "loggedOut"]
-        case .inProgress:
-          payload = ["state": "inProgress"]
-        case .loggedIn:
-          payload = ["state": "authenticated"]
-        @unknown default:
-          return
+    AsyncFunction("openScreen") { @MainActor (route: String, home: HomeArgs) async throws in
+      let screen: ZingSDK.Screen =
+        switch route {
+        case "home": .program(configuration: home.configuration(defaultShowCloseButton: true))
+        case "onboarding": .onboarding
+        case "customWorkout": .customWorkout
+        case "aiAssistant": .assistantChat
+        // The iOS SDK has no dedicated workout plan details screen.
+        case "workoutPlanDetails", "fullSchedule": .fullSchedule
+        case "profileSettings": .profileSettings
+        case "bodyScan": .bodyScan()
+        case "flexibilityTest": .flexibilityTest()
+        case "fitnessTest": .fitnessTest()
+        default: throw Exception(name: "UnknownRoute", description: "Route \(route) is not supported")
         }
-        self?.sendEvent("onAuthStateChanged", payload)
+
+      let viewController = try self.requireSdk().makeScreen(screen)
+      guard let presenter = self.appContext?.utilities?.currentViewController() else {
+        throw Exception(name: "NoRootViewController", description: "No view controller available to present from")
       }
+      viewController.modalPresentationStyle = .fullScreen
+      presenter.present(viewController, animated: true)
+    }
+
+    AsyncFunction("setProfileParams") { @MainActor (args: ProfileArgs) async throws in
+      try self.requireSdk().setProfileParams(ProfileParameters(
+        name: args.name,
+        gender: args.gender,
+        height: args.height,
+        weight: args.weight,
+        age: args.age,
+        measurementSystem: args.measurementSystem
+      ))
+    }
+
+    View(ZingHomeView.self) {
+      Prop("showCloseButton") { (view: ZingHomeView, value: Bool?) in
+        view.home.showCloseButton = value
+      }
+      Prop("showAskCoachButton") { (view: ZingHomeView, value: Bool?) in
+        view.home.showAskCoachButton = value
+      }
+      OnViewDidUpdateProps { (view: ZingHomeView) in
+        guard view.viewController == nil, let sdk = self.sdk else { return }
+        MainActor.assumeIsolated {
+          view.embed(try? sdk.makeScreen(.program(configuration: view.home.configuration(defaultShowCloseButton: false))))
+        }
+      }
+    }
+  }
+
+  private func requireSdk() throws -> ZingSDK {
+    guard let sdk else {
+      throw Exception(name: "NotInitialized", description: "Zing SDK is not initialized")
+    }
+    return sdk
   }
 }
 
-private extension UIViewController {
-  var topPresentedViewController: UIViewController {
-    presentedViewController.flatMap { $0.topPresentedViewController } ?? self
-  }
-
-  var topInNavigationController: UIViewController {
-    (self as? UINavigationController)?.topViewController ?? self
+extension ZingSdkModule: CriticalErrorHandler {
+  public func sdkDidFail(with error: any Error) {
+    sendEvent("onCriticalError", [
+      "code": error is AuthError ? "authError" : "unknown",
+      "message": String(describing: error),
+    ])
   }
 }
 
-private extension UIApplication {
-  var currentScene: UIWindowScene? {
-    connectedScenes.first { $0.activationState == .foregroundActive } as? UIWindowScene
+struct InitializeArgs: Record {
+  @Field var configuration: ConfigurationArgs?
+  @Field var theme: [String: Any]?
+}
+
+struct ConfigurationArgs: Record {
+  @Field var coachesAvailability: CoachesAvailability = .allCoaches
+  @Field var genderAvailability: GenderAvailability = .all
+  @Field var healthBackgroundSync = false
+}
+
+struct LoginArgs: Record {
+  @Field var jwtToken: String?
+  @Field var apiKey: String?
+  @Field var partnerUserId: String?
+}
+
+struct HomeArgs: Record {
+  @Field var showCloseButton: Bool?
+  @Field var showAskCoachButton: Bool?
+
+  func configuration(defaultShowCloseButton: Bool) -> ZingSDK.ProgramScreenConfiguration {
+    .init(showCloseButton: showCloseButton ?? defaultShowCloseButton, showAskCoachButton: showAskCoachButton ?? true)
+  }
+}
+
+struct ProfileArgs: Record {
+  @Field var name: String?
+  @Field var gender: ProfileParameters.UserGender?
+  @Field var height: Double?
+  @Field var weight: Double?
+  @Field var age: Int?
+  @Field var measurementSystem: ProfileParameters.Unit?
+}
+
+extension CoachesAvailability: @retroactive CaseIterable, @retroactive Enumerable {
+  public static let allCases: [Self] = [.allCoaches, .userGenderBased]
+}
+
+extension GenderAvailability: @retroactive CaseIterable, @retroactive Enumerable {
+  public static let allCases: [Self] = [.all, .binary]
+}
+
+extension ProfileParameters.UserGender: @retroactive Enumerable {}
+extension ProfileParameters.Unit: @retroactive Enumerable {}
+
+private extension LoginState {
+  var payload: [String: String]? {
+    switch self {
+    case .loggedOut: ["state": "loggedOut"]
+    case .inProgress: ["state": "inProgress"]
+    case .loggedIn(let userId): ["state": "authenticated", "userId": userId]
+    @unknown default: nil
+    }
   }
 }

@@ -1,332 +1,292 @@
 package expo.modules.zingsdk
 
+import android.annotation.SuppressLint
 import android.content.Context
-import android.graphics.Typeface
-import android.util.Log
 import androidx.core.content.res.ResourcesCompat
-import coach.zing.fitness.coach.AuthTokenCallback
 import coach.zing.fitness.coach.CoachesAvailability
 import coach.zing.fitness.coach.Configuration
+import coach.zing.fitness.coach.CriticalErrorHandler
 import coach.zing.fitness.coach.GenderAvailability
+import coach.zing.fitness.coach.MeasurementUnit
+import coach.zing.fitness.coach.ProfileParams
 import coach.zing.fitness.coach.SdkAuthState
 import coach.zing.fitness.coach.SdkAuthentication
 import coach.zing.fitness.coach.StartingRoute
+import coach.zing.fitness.coach.UserGender
 import coach.zing.fitness.coach.ZingSdk
 import coach.zing.fitness.coach.ZingSdkActivity
 import coach.zing.fitness.coach.ZingSdkTheme
-import expo.modules.kotlin.Promise
+import coach.zing.fitness.coach.ZingSdkTheme.CornerRadius.SdkRadius
+import coach.zing.fitness.coach.embedded.home.HomeScreenConfig
 import expo.modules.kotlin.exception.CodedException
+import expo.modules.kotlin.functions.Coroutine
+import expo.modules.kotlin.functions.Queues
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
-import java.util.UUID
-import java.util.concurrent.ConcurrentHashMap
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
+import expo.modules.kotlin.records.Field
+import expo.modules.kotlin.records.Record
+import expo.modules.kotlin.types.Enumerable
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
 class ZingSdkModule : Module() {
 
-  private companion object {
-    const val TAG = "ZingSdkModule"
-  }
+  private val context: Context
+    get() = requireNotNull(appContext.reactContext)
 
-  private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
   private var authStateJob: Job? = null
-  @Volatile private var initialized = false
-  @Volatile private var initializing = false
-  private val pendingTokenRequests = ConcurrentHashMap<String, CompletableDeferred<String>>()
 
   override fun definition() = ModuleDefinition {
     Name("ZingSdk")
 
-    Events("onAuthStateChanged", "onAuthTokenRequested", "onTokenInvalid")
+    Events("onAuthStateChanged", "onCriticalError")
 
-    AsyncFunction("initialize") { args: Map<String, Any?>, promise: Promise ->
-      if (initialized || initializing) {
-        promise.reject(CodedException("ALREADY_INITIALIZED", "Zing SDK is already initialized", null))
-        return@AsyncFunction
+    OnCreate {
+      ZingSdk.criticalErrorHandler = CriticalErrorHandler { error ->
+        sendEvent("onCriticalError", mapOf("code" to "authError", "message" to error.toString()))
       }
-      initializing = true
-      scope.launch {
-        try {
-          val auth = buildAuthentication(args)
-          val theme = buildTheme(args["theme"].asMapOrNull())
-          val configuration = args["configuration"].asMapOrNull()?.let { buildConfiguration(it) }
-          ZingSdk.init(auth, theme, configuration)
-          initialized = true
-          observeAuthState()
-          promise.resolve(null)
-        } catch (cancellation: CancellationException) {
-          throw cancellation
-        } catch (error: Throwable) {
-          Log.e(TAG, "Failed to initialize Zing SDK", error)
-          if (error is IllegalArgumentException) {
-            promise.reject(CodedException("INVALID_ARGUMENT", error.message, error))
-          } else {
-            promise.reject(CodedException("INIT_FAILED", error.message ?: "Initialization failed", error))
-          }
-        } finally {
-          initializing = false
-        }
-      }
-    }
-
-    AsyncFunction("login") { promise: Promise ->
-      if (!initialized) {
-        promise.reject(CodedException("NOT_INITIALIZED", "Zing SDK is not initialized", null))
-        return@AsyncFunction
-      }
-      scope.launch {
-        try {
-          ZingSdk.login()
-          promise.resolve(null)
-        } catch (cancellation: CancellationException) {
-          throw cancellation
-        } catch (error: Throwable) {
-          promise.reject(CodedException("LOGIN_FAILED", error.message ?: "Login failed", error))
-        }
-      }
-    }
-
-    AsyncFunction("logout") { promise: Promise ->
-      if (!initialized) {
-        promise.reject(CodedException("NOT_INITIALIZED", "Zing SDK is not initialized", null))
-        return@AsyncFunction
-      }
-      scope.launch {
-        try {
-          ZingSdk.logout()
-          promise.resolve(null)
-        } catch (cancellation: CancellationException) {
-          throw cancellation
-        } catch (error: Throwable) {
-          promise.reject(CodedException("LOGOUT_FAILED", error.message ?: "Logout failed", error))
-        }
-      }
-    }
-
-    AsyncFunction("openScreen") { route: String, promise: Promise ->
-      if (!initialized) {
-        promise.reject(CodedException("NOT_INITIALIZED", "Zing SDK is not initialized", null))
-        return@AsyncFunction
-      }
-      val startingRoute = when (route) {
-        "home" -> StartingRoute.Home
-        "custom_workout" -> StartingRoute.CustomWorkout
-        "ai_assistant" -> StartingRoute.AiAssistant
-        "workout_plan_details" -> StartingRoute.WorkoutPlanDetails
-        "full_schedule" -> StartingRoute.FullSchedule
-        "profile_settings" -> StartingRoute.ProfileSettings
-        "body_scan" -> StartingRoute.BodyScan
-        "flexibility_test" -> StartingRoute.FlexibilityTest
-        "fitness_test" -> StartingRoute.FitnessTest
-        else -> {
-          promise.reject(CodedException("UNKNOWN_ROUTE", "Route $route is not supported", null))
-          return@AsyncFunction
-        }
-      }
-      val activity = appContext.currentActivity
-      if (activity == null) {
-        promise.reject(CodedException("NO_ACTIVITY", "No activity is currently attached", null))
-        return@AsyncFunction
-      }
-      runCatching { ZingSdkActivity.launch(activity, startingRoute) }
-        .onSuccess { promise.resolve(null) }
-        .onFailure { error ->
-          promise.reject(CodedException("LAUNCH_FAILED", error.message ?: "Failed to launch route", error))
-        }
-    }
-
-    Function("provideAuthToken") { requestId: String, token: String ->
-      pendingTokenRequests.remove(requestId)?.complete(token)
-      Unit
-    }
-
-    Function("rejectAuthToken") { requestId: String, message: String ->
-      pendingTokenRequests.remove(requestId)
-        ?.completeExceptionally(RuntimeException("getAuthToken failed: $message"))
-      Unit
     }
 
     OnDestroy {
       authStateJob?.cancel()
-      scope.cancel()
-      val destroyed = IllegalStateException("ZingSdk module was destroyed before the token request completed")
-      pendingTokenRequests.values.forEach { it.completeExceptionally(destroyed) }
-      pendingTokenRequests.clear()
     }
-  }
 
-  private fun buildAuthentication(args: Map<String, Any?>): SdkAuthentication {
-    return when (val type = args["type"] as? String) {
-      "apiKey" -> {
-        val apiKey = args["apiKey"] as? String
-        require(!apiKey.isNullOrEmpty()) { "apiKey is required" }
-        SdkAuthentication.ApiKey(apiKey = apiKey)
-      }
+    // The SDK expects its suspend functions to be called on the main thread.
+    (AsyncFunction("initialize") Coroutine { args: InitializeArgs ->
+      ZingSdk.init(theme = args.theme?.let(::buildTheme), configuration = args.configuration?.toSdk())
+      observeAuthState()
+    }).runOnQueue(Queues.MAIN)
 
-      "externalToken" -> SdkAuthentication.ExternalToken(
-        authTokenCallback = bridgeAuthTokenCallback()
+    (AsyncFunction("login") Coroutine { args: LoginArgs ->
+      ZingSdk.login(
+        when {
+          args.jwtToken != null -> SdkAuthentication.ExternalToken(jwtToken = args.jwtToken)
+          args.apiKey != null -> SdkAuthentication.ApiKey(apiKey = args.apiKey, partnerUserId = args.partnerUserId)
+          else -> throw CodedException("ERR_INVALID_AUTHENTICATION", "Provide either apiKey or externalToken", null)
+        }
       )
+    }).runOnQueue(Queues.MAIN)
 
-      else -> throw IllegalArgumentException("Unknown auth type: $type")
-    }
-  }
+    (AsyncFunction("logout") Coroutine { ->
+      ZingSdk.logout()
+    }).runOnQueue(Queues.MAIN)
 
-  /**
-   * Suspends the SDK's token request until JS answers the emitted
-   * `onAuthTokenRequested` event via `provideAuthToken`/`rejectAuthToken`.
-   */
-  private fun bridgeAuthTokenCallback() = object : AuthTokenCallback {
-    override suspend fun getAuthToken(): String {
-      val requestId = UUID.randomUUID().toString()
-      val deferred = CompletableDeferred<String>()
-      pendingTokenRequests[requestId] = deferred
-      sendEvent("onAuthTokenRequested", mapOf("requestId" to requestId))
-      try {
-        return deferred.await()
-      } finally {
-        pendingTokenRequests.remove(requestId)
+    AsyncFunction("openScreen") { route: String, home: HomeArgs ->
+      val startingRoute = when (route) {
+        "home" -> StartingRoute.Home(home.toSdk(defaultShowCloseButton = true))
+        "onboarding" -> StartingRoute.Onboarding(navigateToHome = false)
+        "customWorkout" -> StartingRoute.CustomWorkout
+        "aiAssistant" -> StartingRoute.AiAssistant
+        "workoutPlanDetails" -> StartingRoute.WorkoutPlanDetails
+        "fullSchedule" -> StartingRoute.FullSchedule
+        "profileSettings" -> StartingRoute.ProfileSettings
+        "bodyScan" -> StartingRoute.BodyScan
+        "flexibilityTest" -> StartingRoute.FlexibilityTest
+        "fitnessTest" -> StartingRoute.FitnessTest
+        else -> throw CodedException("ERR_UNKNOWN_ROUTE", "Route $route is not supported", null)
       }
+      val activity = appContext.currentActivity
+        ?: throw CodedException("ERR_NO_ACTIVITY", "No activity is currently attached", null)
+      ZingSdkActivity.launch(activity, startingRoute)
     }
 
-    override fun onTokenInvalid() {
-      sendEvent("onTokenInvalid", emptyMap<String, Any>())
+    (AsyncFunction("setProfileParams") Coroutine { args: ProfileArgs ->
+      ZingSdk.setProfileParams(
+        ProfileParams(
+          name = args.name,
+          gender = args.gender?.sdk,
+          height = args.height,
+          weight = args.weight,
+          age = args.age,
+          measurementSystem = args.measurementSystem?.sdk,
+        )
+      )
+    }).runOnQueue(Queues.MAIN)
+
+    View(ZingHomeView::class) {
+      Prop("showCloseButton") { view: ZingHomeView, value: Boolean? ->
+        view.showCloseButton = value ?: false
+      }
+      Prop("showAskCoachButton") { view: ZingHomeView, value: Boolean? ->
+        view.showAskCoachButton = value ?: true
+      }
+      OnViewDidUpdateProps { view: ZingHomeView -> view.applyConfig() }
     }
   }
 
   private fun observeAuthState() {
     authStateJob?.cancel()
-    authStateJob = scope.launch {
+    authStateJob = appContext.mainQueue.launch {
       ZingSdk.authState.collect { state ->
-        val mapped = when (state) {
-          is SdkAuthState.LoggedOut -> "loggedOut"
-          is SdkAuthState.InProgress -> "inProgress"
-          is SdkAuthState.LoggedIn -> "authenticated"
+        val payload = when (state) {
+          is SdkAuthState.LoggedOut -> mapOf("state" to "loggedOut")
+          is SdkAuthState.InProgress -> mapOf("state" to "inProgress")
+          is SdkAuthState.LoggedIn -> mapOf("state" to "authenticated", "userId" to state.userId)
           else -> return@collect
         }
-        sendEvent("onAuthStateChanged", mapOf("state" to mapped))
+        sendEvent("onAuthStateChanged", payload)
       }
     }
   }
 
-  private fun buildTheme(themeMap: Map<String, Any?>?): ZingSdkTheme? {
-    val colors = themeMap?.let { buildColors(it) }
-    val typography = themeMap?.let { buildTypography(it) }
+  private fun buildTheme(theme: ThemeArgs): ZingSdkTheme? {
+    val colors = theme.colors?.toSdk()
+    val typography = theme.typography?.let(::buildTypography)
+    val buttonRadius = theme.cornersRounding?.button?.toSdk()
     val assets = buildAssets()
-    val cornerRadius = themeMap?.let { buildCornerRadius(it) }
-    if (colors == null && typography == null && assets == null && cornerRadius == null) return null
+    if (colors == null && typography == null && buttonRadius == null && assets == null) return null
     return ZingSdkTheme(
       colors = colors,
       typography = typography,
       assets = assets,
-      cornerRadius = cornerRadius,
+      cornerRadius = buttonRadius?.let { ZingSdkTheme.CornerRadius(button = it) },
     )
   }
 
-  private fun buildColors(themeMap: Map<String, Any?>): ZingSdkTheme.Colors? {
-    val colorsMap = themeMap["colors"].asMapOrNull() ?: return null
-    fun color(key: String): Long? = (colorsMap[key] as? Number)?.toLong()
-    return ZingSdkTheme.Colors(
-      brandPrimary = color("brand/primary"),
-      brandSecondary = color("brand/secondary"),
-      textHeadingDarkPrimary = color("text/heading/dark-primary"),
-      textHeadingLightPrimary = color("text/heading/light-primary"),
-      textBodyDarkPrimary = color("text/body/dark-primary"),
-      textBodyDarkSecondary = color("text/body/dark-secondary"),
-      buttonPrimary = color("button/primary"),
-      buttonSecondary = color("button/secondary"),
-      bgPrimary = color("bg/primary"),
-      bgSecondary = color("bg/secondary"),
-    )
-  }
-
-  private fun buildTypography(themeMap: Map<String, Any?>): ZingSdkTheme.Typography? {
-    val typographyMap = themeMap["typography"].asMapOrNull() ?: return null
-    val context = hostContext() ?: return null
-    val system = (typographyMap["system"] as? String)?.let { loadFont(context, it) }
-    val brand = (typographyMap["brand"] as? String)?.let { loadFont(context, it) }
+  private fun buildTypography(typography: TypographyArgs): ZingSdkTheme.Typography? {
+    fun font(name: String?) = name?.let { resourceId(it, "font") }?.let { ResourcesCompat.getFont(context, it) }
+    val system = font(typography.system)
+    val brand = font(typography.brand)
     if (system == null && brand == null) return null
     return ZingSdkTheme.Typography(system = system, brand = brand)
   }
 
-  private fun loadFont(context: Context, fontName: String): Typeface? {
-    val resId = context.resources.getIdentifier(fontName, "font", context.packageName)
-    if (resId == 0) {
-      Log.w(TAG, "Font not found in host res/font: $fontName")
-      return null
-    }
-    return ResourcesCompat.getFont(context, resId)
-  }
-
   private fun buildAssets(): ZingSdkTheme.Assets? {
-    val context = hostContext() ?: return null
-
-    fun drawable(name: String): Int? {
-      val id = context.resources.getIdentifier(name, "drawable", context.packageName)
-      return if (id != 0) id else null
-    }
-
-    val planBackground = drawable("zing_plan_background")
-    val welcomePicture = drawable("zing_welcome_picture")
-    val coachAsset = ZingSdkTheme.Assets.CoachAsset(
-      john = drawable("zing_coach_john"),
-      jennifer = drawable("zing_coach_jennifer"),
-      sarah = drawable("zing_coach_sarah"),
-      chris = drawable("zing_coach_chris"),
+    val planBackground = resourceId("zing_plan_background", "drawable")
+    val coachImages = ZingSdkTheme.Assets.CoachAsset(
+      john = resourceId("zing_coach_john", "drawable"),
+      jennifer = resourceId("zing_coach_jennifer", "drawable"),
+      sarah = resourceId("zing_coach_sarah", "drawable"),
+      chris = resourceId("zing_coach_chris", "drawable"),
     )
-    val hasCoach = coachAsset.john != null || coachAsset.jennifer != null ||
-      coachAsset.sarah != null || coachAsset.chris != null
-
-    if (planBackground == null && welcomePicture == null && !hasCoach) return null
-    return ZingSdkTheme.Assets(
-      planBackground = planBackground,
-      welcomePicture = welcomePicture,
-      coachImages = if (hasCoach) coachAsset else null,
-    )
+    val hasCoachImages = listOf(coachImages.john, coachImages.jennifer, coachImages.sarah, coachImages.chris).any { it != null }
+    if (planBackground == null && !hasCoachImages) return null
+    return ZingSdkTheme.Assets(planBackground = planBackground, coachImages = coachImages.takeIf { hasCoachImages })
   }
 
-  private fun buildCornerRadius(themeMap: Map<String, Any?>): ZingSdkTheme.CornerRadius? {
-    val cornerMap = themeMap["cornersRounding"].asMapOrNull() ?: return null
-    val buttonMap = cornerMap["button/border"].asMapOrNull() ?: return null
-    val sdkRadius = when (buttonMap["type"] as? String) {
-      "pill" -> ZingSdkTheme.CornerRadius.SdkRadius.Pill
-      "value" -> {
-        val value = (buttonMap["value"] as? Number)?.toInt() ?: 0
-        ZingSdkTheme.CornerRadius.SdkRadius.Value(value)
-      }
-      else -> return null
-    }
-    return ZingSdkTheme.CornerRadius(button = sdkRadius)
+  // Resource names come from the app's config plugin at runtime, so they cannot be referenced through R.
+  @SuppressLint("DiscouragedApi")
+  private fun resourceId(name: String, type: String) =
+    context.resources.getIdentifier(name, type, context.packageName).takeIf { it != 0 }
+}
+
+class InitializeArgs : Record {
+  @Field val configuration: ConfigurationArgs? = null
+  @Field val theme: ThemeArgs? = null
+}
+
+class ConfigurationArgs : Record {
+  @Field val coachesAvailability = CoachesAvailabilityArg.ALL_COACHES
+  @Field val genderAvailability = GenderAvailabilityArg.ALL
+  @Field val healthBackgroundSync = false
+
+  fun toSdk() = Configuration(
+    coachesAvailability = coachesAvailability.sdk,
+    genderAvailability = genderAvailability.sdk,
+    healthConnectBackgroundSync = healthBackgroundSync,
+  )
+}
+
+class LoginArgs : Record {
+  @Field val jwtToken: String? = null
+  @Field val apiKey: String? = null
+  @Field val partnerUserId: String? = null
+}
+
+class HomeArgs : Record {
+  @Field val showCloseButton: Boolean? = null
+  @Field val showAskCoachButton: Boolean? = null
+
+  fun toSdk(defaultShowCloseButton: Boolean) = HomeScreenConfig(
+    backButtonIsVisible = showCloseButton ?: defaultShowCloseButton,
+    askCoachIsVisible = showAskCoachButton ?: true,
+  )
+}
+
+class ProfileArgs : Record {
+  @Field val name: String? = null
+  @Field val gender: GenderArg? = null
+  @Field val height: Float? = null
+  @Field val weight: Float? = null
+  @Field val age: Int? = null
+  @Field val measurementSystem: MeasurementSystemArg? = null
+}
+
+class ThemeArgs : Record {
+  @Field val colors: ColorsArgs? = null
+  @Field val typography: TypographyArgs? = null
+  @Field val cornersRounding: CornersRoundingArgs? = null
+}
+
+// Unsigned ARGB integers, keyed by design token.
+class ColorsArgs : Record {
+  @Field("brand/primary") val brandPrimary: Long? = null
+  @Field("brand/secondary") val brandSecondary: Long? = null
+  @Field("text/heading/dark-primary") val textHeadingDarkPrimary: Long? = null
+  @Field("text/heading/light-primary") val textHeadingLightPrimary: Long? = null
+  @Field("text/body/dark-primary") val textBodyDarkPrimary: Long? = null
+  @Field("text/body/dark-secondary") val textBodyDarkSecondary: Long? = null
+  @Field("button/primary") val buttonPrimary: Long? = null
+  @Field("button/secondary") val buttonSecondary: Long? = null
+  @Field("bg/primary") val bgPrimary: Long? = null
+  @Field("bg/secondary") val bgSecondary: Long? = null
+
+  fun toSdk() = ZingSdkTheme.Colors(
+    brandPrimary = brandPrimary,
+    brandSecondary = brandSecondary,
+    textHeadingDarkPrimary = textHeadingDarkPrimary,
+    textHeadingLightPrimary = textHeadingLightPrimary,
+    textBodyDarkPrimary = textBodyDarkPrimary,
+    textBodyDarkSecondary = textBodyDarkSecondary,
+    buttonPrimary = buttonPrimary,
+    buttonSecondary = buttonSecondary,
+    bgPrimary = bgPrimary,
+    bgSecondary = bgSecondary,
+  )
+}
+
+class TypographyArgs : Record {
+  @Field val system: String? = null
+  @Field val brand: String? = null
+}
+
+// The Android SDK only supports the button radius.
+class CornersRoundingArgs : Record {
+  @Field("radius/button") val button: RadiusArgs? = null
+}
+
+class RadiusArgs : Record {
+  @Field val type = RadiusType.VALUE
+  @Field val value = 0
+
+  fun toSdk() = when (type) {
+    RadiusType.PILL -> SdkRadius.Pill
+    RadiusType.VALUE -> SdkRadius.Value(value)
   }
+}
 
-  private fun buildConfiguration(configMap: Map<String, Any?>): Configuration {
-    val coachesAvailability = when (configMap["coachesAvailability"] as? String) {
-      "allCoaches" -> CoachesAvailability.ALL_COACHES
-      "userGenderBased" -> CoachesAvailability.USER_GENDER_BASED
-      else -> null
-    }
-    val genderAvailability = when (configMap["genderAvailability"] as? String) {
-      "all" -> GenderAvailability.ALL
-      "binary" -> GenderAvailability.BINARY
-      else -> null
-    }
-    val healthBackgroundSync = configMap["healthBackgroundSync"] as? Boolean ?: false
-    return Configuration(
-      coachesAvailability = coachesAvailability,
-      genderAvailability = genderAvailability,
-      healthConnectBackgroundSync = healthBackgroundSync,
-    )
-  }
+enum class RadiusType(val value: String) : Enumerable { PILL("pill"), VALUE("value") }
 
-  private fun hostContext(): Context? =
-    appContext.currentActivity ?: appContext.reactContext
+enum class CoachesAvailabilityArg(val value: String) : Enumerable {
+  ALL_COACHES("allCoaches"), USER_GENDER_BASED("userGenderBased");
 
-  @Suppress("UNCHECKED_CAST")
-  private fun Any?.asMapOrNull(): Map<String, Any?>? = this as? Map<String, Any?>
+  val sdk get() = CoachesAvailability.valueOf(name)
+}
+
+enum class GenderAvailabilityArg(val value: String) : Enumerable {
+  ALL("all"), BINARY("binary");
+
+  val sdk get() = GenderAvailability.valueOf(name)
+}
+
+enum class GenderArg(val value: String) : Enumerable {
+  MALE("male"), FEMALE("female"), OTHER("other"), PREFER_NOT_TO_SAY("preferNotToSay");
+
+  val sdk get() = if (this == PREFER_NOT_TO_SAY) null else UserGender.valueOf(name)
+}
+
+enum class MeasurementSystemArg(val value: String) : Enumerable {
+  METRIC("metric"), IMPERIAL("imperial");
+
+  val sdk get() = MeasurementUnit.valueOf(name)
 }

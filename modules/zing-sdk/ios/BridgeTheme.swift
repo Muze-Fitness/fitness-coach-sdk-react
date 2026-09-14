@@ -1,8 +1,6 @@
 import DesignSystem
 import UIKit
 
-/// Builds a `DesignSystem.Theme` from the dictionary sent over the JS bridge.
-/// Mirrors `FlutterTheme` in the Flutter wrapper so both stay in sync.
 struct BridgeTheme {
   let arguments: [String: Any]
 
