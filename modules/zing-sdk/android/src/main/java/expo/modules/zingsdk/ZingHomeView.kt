@@ -1,7 +1,6 @@
 package expo.modules.zingsdk
 
 import android.content.Context
-import coach.zing.fitness.coach.embedded.home.HomeScreenConfig
 import coach.zing.fitness.coach.embedded.home.ZingSdkHomeView
 import expo.modules.kotlin.AppContext
 import expo.modules.kotlin.views.ExpoView
@@ -10,15 +9,12 @@ class ZingHomeView(context: Context, appContext: AppContext) : ExpoView(context,
 
   override val shouldUseAndroidLayout = true
 
-  var showCloseButton = false
-  var showAskCoachButton = true
+  val home = HomeArgs()
 
   private var homeView: ZingSdkHomeView? = null
 
   fun applyConfig() {
-    homeView?.setConfig(
-      HomeScreenConfig(backButtonIsVisible = showCloseButton, askCoachIsVisible = showAskCoachButton)
-    )
+    homeView?.setConfig(home.toSdk(defaultShowCloseButton = false))
   }
 
   override fun onAttachedToWindow() {

@@ -1,5 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import { Tabs } from 'expo-router';
+import { lightTheme } from '../constants/ZingThemes';
 import { initialize } from '../modules/zing-sdk';
 
 initialize({
@@ -8,10 +9,7 @@ initialize({
     genderAvailability: 'binary',
     healthBackgroundSync: true
   },
-  theme: {
-    colors: { brandPrimary: '#F2001F', brandSecondary: '#980052' },
-    cornersRounding: { button: { type: 'value', value: 0 } }
-  }
+  theme: lightTheme
 }).catch(console.error);
 
 export default function RootLayout() {

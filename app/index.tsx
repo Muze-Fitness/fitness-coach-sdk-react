@@ -1,20 +1,31 @@
 import { useState } from 'react';
-import { Button, Platform, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Button, Platform, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { ZING_API_KEYS } from '../constants/ZingApiKeys';
-import { login, logout, openScreen, setProfileParams, useAuthState, type ZingRoute } from '../modules/zing-sdk';
+import { darkTheme, lightTheme } from '../constants/ZingThemes';
+import {
+  login,
+  logout,
+  openScreen,
+  setPrimaryLocationId,
+  setProfileParams,
+  setTheme,
+  useAuthState,
+  useCriticalErrorListener,
+  type ZingRoute
+} from '../modules/zing-sdk';
 
-const ROUTES = [
-  ['Home', 'home'],
-  ['Onboarding', 'onboarding'],
-  ['Custom Workout', 'customWorkout'],
-  ['AI Assistant', 'aiAssistant'],
-  ['Workout Plan Details', 'workoutPlanDetails'],
-  ['Full Schedule', 'fullSchedule'],
-  ['Profile Settings', 'profileSettings'],
-  ['Body Scan', 'bodyScan'],
-  ['Flexibility Test', 'flexibilityTest'],
-  ['Fitness Test', 'fitnessTest']
-] as const satisfies readonly (readonly [string, ZingRoute])[];
+const ROUTE_TITLES = {
+  home: 'Home',
+  onboarding: 'Onboarding',
+  customWorkout: 'Custom Workout',
+  aiAssistant: 'AI Assistant',
+  workoutPlanDetails: 'Workout Plan Details',
+  fullSchedule: 'Full Schedule',
+  profileSettings: 'Profile Settings',
+  bodyScan: 'Body Scan',
+  flexibilityTest: 'Flexibility Test',
+  fitnessTest: 'Fitness Test'
+} satisfies Record<ZingRoute, string>;
 
 const API_KEY = Platform.OS === 'ios'
   ? ZING_API_KEYS.ios
@@ -23,13 +34,19 @@ const API_KEY = Platform.OS === 'ios'
 const LOGIN_TITLES = {
   loggedOut: 'Login',
   inProgress: 'In Progress...',
-  authenticated: 'Logout'
+  loggedIn: 'Logout'
 } as const;
 
 export default function SettingsTab() {
   const authState = useAuthState();
   const [partnerUserId, setPartnerUserId] = useState('');
   const [error, setError] = useState<string>();
+  const [isDarkTheme, setIsDarkTheme] = useState(false);
+  const [primaryLocationId, setPrimaryLocationIdInput] = useState('');
+
+  useCriticalErrorListener(({ code, message }) =>
+    setError(code === 'authError' ? 'Session expired, log in again' : message)
+  );
 
   const run = async (action: () => Promise<void>) => {
     setError(undefined);
@@ -40,10 +57,11 @@ export default function SettingsTab() {
     }
   };
 
-  const state = authState?.state;
+  // `undefined` while `initialize` restores a saved session.
+  const status = authState?.status;
 
   const loginOrLogout = () =>
-    state === 'authenticated'
+    status === 'loggedIn'
       ? logout()
       : login({ apiKey: API_KEY, partnerUserId: partnerUserId.trim() || undefined });
 
@@ -57,42 +75,73 @@ export default function SettingsTab() {
       measurementSystem: 'metric'
     });
 
+  const toggleTheme = (dark: boolean) =>
+    run(async () => {
+      await setTheme(dark ? darkTheme : lightTheme);
+      setIsDarkTheme(dark);
+    });
+
   return (
     <ScrollView contentContainerStyle={styles.container}>
+      <View style={styles.row}>
+        <Text>Dark theme</Text>
+        <Switch value={isDarkTheme} onValueChange={toggleTheme} />
+      </View>
       <Button
-        title={state ? LOGIN_TITLES[state] : LOGIN_TITLES.loggedOut}
-        disabled={state === 'inProgress'}
+        title={LOGIN_TITLES[status ?? 'inProgress']}
+        disabled={status !== 'loggedOut' && status !== 'loggedIn'}
         onPress={() => run(loginOrLogout)}
       />
-      {state === 'authenticated' && <Button title="Set Profile Params" onPress={() => run(setProfile)} />}
-      {state === 'loggedOut' && (
+      {status === 'loggedOut' && (
         <TextInput
-          placeholder="Partner ID (optional)"
+          placeholder="Partner user ID (optional)"
           autoCapitalize="none"
           value={partnerUserId}
           onChangeText={setPartnerUserId}
           style={styles.input}
         />
       )}
+      {status === 'loggedIn' && (
+        <>
+          <Button title="Set Profile Params" onPress={() => run(setProfile)} />
+          <TextInput
+            placeholder="Primary location ID"
+            autoCapitalize="none"
+            value={primaryLocationId}
+            onChangeText={setPrimaryLocationIdInput}
+            style={styles.input}
+          />
+          <Button
+            title="Set Primary Location ID"
+            disabled={!primaryLocationId.trim()}
+            onPress={() => run(() => setPrimaryLocationId(primaryLocationId.trim()))}
+          />
+        </>
+      )}
 
-      <Text style={styles.centered}>Auth state: {state ?? 'unknown'}</Text>
-      {authState?.state === 'authenticated' && (
+      <Text style={styles.centered}>Auth status: {status ?? 'unknown'}</Text>
+      {authState?.status === 'loggedIn' && (
         <Text selectable style={styles.centered}>
           User ID: {authState.userId}
         </Text>
       )}
       {error && <Text style={[styles.centered, styles.error]}>{error}</Text>}
 
-      <View style={styles.sectionGap} />
-      {ROUTES.map(([title, route]) => (
-        <Button key={route} title={title} onPress={() => run(() => openScreen(route))} />
-      ))}
+      {status === 'loggedIn' && (
+        <>
+          <View style={styles.sectionGap} />
+          {(Object.entries(ROUTE_TITLES) as [ZingRoute, string][]).map(([route, title]) => (
+            <Button key={route} title={title} onPress={() => run(() => openScreen(route))} />
+          ))}
+        </>
+      )}
     </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
   container: { padding: 16, gap: 8 },
+  row: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   input: { borderWidth: 1, borderRadius: 8, padding: 12 },
   centered: { textAlign: 'center' },
   error: { color: 'red' },

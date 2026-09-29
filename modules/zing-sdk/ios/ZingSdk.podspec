@@ -12,7 +12,7 @@ Pod::Spec.new do |s|
   s.dependency 'ExpoModulesCore'
   spm_dependency(s,
     url: 'https://github.com/Muze-Fitness/zing-coach-sdk-ios',
-    requirement: { kind: 'exactVersion', version: '2.2.0' },
+    requirement: { kind: 'exactVersion', version: '2.3.0' },
     products: ['ZingCoach']
   )
 

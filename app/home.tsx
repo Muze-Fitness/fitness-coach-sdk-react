@@ -5,7 +5,7 @@ import { useAuthState, ZingHomeView } from '../modules/zing-sdk';
 export default function HomeTab() {
   const authState = useAuthState();
 
-  if (authState?.state !== 'authenticated') {
+  if (authState?.status !== 'loggedIn') {
     return (
       <View style={styles.placeholder}>
         <Text style={styles.message}>Log in on the Settings tab to see the Zing home screen</Text>
@@ -13,7 +13,7 @@ export default function HomeTab() {
     );
   }
 
-  return <ZingHomeView style={styles.fill} showCloseButton={false} />;
+  return <ZingHomeView style={styles.fill} />;
 }
 
 const styles = StyleSheet.create({
